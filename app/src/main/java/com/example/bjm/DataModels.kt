@@ -1,6 +1,7 @@
 package com.example.bjm
 
 import androidx.room.Entity
+import androidx.room.Index
 import androidx.room.PrimaryKey
 
 enum class MessageStatus { PENDING, SENT, DELIVERED, SEEN }
@@ -16,7 +17,10 @@ data class Friend(
     val lastMessageTimestamp: Long = 0
 )
 
-@Entity(tableName = "messages")
+@Entity(
+    tableName = "messages",
+    indices = [Index(value = ["messageUuid"], unique = true)]
+)
 data class Message(
     @PrimaryKey(autoGenerate = true) val id: Int = 0,
     val senderId: String,
@@ -24,5 +28,6 @@ data class Message(
     val content: String,
     val timestamp: Long = System.currentTimeMillis(),
     val isSentByMe: Boolean = true,
-    val status: MessageStatus = MessageStatus.SENT
+    val status: MessageStatus = MessageStatus.SENT,
+    val messageUuid: String = ""
 )

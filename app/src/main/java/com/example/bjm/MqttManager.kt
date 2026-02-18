@@ -3,14 +3,14 @@ package com.example.bjm
 import android.content.Context
 import android.util.Log
 import com.hivemq.client.mqtt.MqttClient
+import com.hivemq.client.mqtt.datatypes.MqttQos
 import com.hivemq.client.mqtt.mqtt5.Mqtt5AsyncClient
-import com.hivemq.client.mqtt.mqtt5.message.connect.connack.Mqtt5ConnAck
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.util.UUID
 
-class MqttManager(private val context: Context, private val dao: ChatDao) {
+class MqttManager private constructor(private val context: Context, private val dao: ChatDao) {
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val myId: String = getOrCreateClientId()
     private var client: Mqtt5AsyncClient? = null
@@ -19,6 +19,22 @@ class MqttManager(private val context: Context, private val dao: ChatDao) {
 
     private val _isConnected = MutableStateFlow(false)
     val isConnected = _isConnected.asStateFlow()
+
+    var isAppInForeground = false
+    var currentActiveChatFriendId: String? = null
+
+    companion object {
+        @Volatile
+        private var INSTANCE: MqttManager? = null
+
+        fun getInstance(context: Context, dao: ChatDao): MqttManager {
+            return INSTANCE ?: synchronized(this) {
+                val instance = MqttManager(context.applicationContext, dao)
+                INSTANCE = instance
+                instance
+            }
+        }
+    }
 
     private fun getOrCreateClientId(): String {
         val prefs = context.getSharedPreferences("mqtt_prefs", Context.MODE_PRIVATE)
@@ -62,7 +78,7 @@ class MqttManager(private val context: Context, private val dao: ChatDao) {
 
             client?.connectWith()
                 ?.cleanStart(false)
-                ?.sessionExpiryInterval(3600 * 24)
+                ?.sessionExpiryInterval(3600 * 24 * 7)
                 ?.send()
                 ?.whenComplete { _, throwable ->
                 if (throwable != null) {
@@ -85,6 +101,7 @@ class MqttManager(private val context: Context, private val dao: ChatDao) {
     private fun subscribeToTopics() {
         client?.subscribeWith()
             ?.topicFilter("bjm/chat/$myId")
+            ?.qos(MqttQos.AT_LEAST_ONCE)
             ?.callback { publish ->
                 val payload = String(publish.payloadAsBytes)
                 handleIncomingMessage(payload)
@@ -101,6 +118,7 @@ class MqttManager(private val context: Context, private val dao: ChatDao) {
         
         client?.subscribeWith()
             ?.topicFilter("bjm/ack/$myId")
+            ?.qos(MqttQos.AT_LEAST_ONCE)
             ?.callback { publish ->
                 val payload = String(publish.payloadAsBytes)
                 handleAck(payload)
@@ -147,16 +165,47 @@ class MqttManager(private val context: Context, private val dao: ChatDao) {
 
     private fun handleIncomingMessage(payload: String) {
         val parts = payload.split(":", limit = 3)
-        if (parts.size == 3) {
+        if (parts.size >= 2) {
             val senderId = parts[0]
-            val messageId = parts[1]
-            val content = parts[2]
-            scope.launch {
-                dao.insertMessage(Message(senderId = senderId, receiverId = myId, content = content, isSentByMe = false))
-                dao.insertFriend(Friend(senderId, senderId, true, System.currentTimeMillis(), lastMessageTimestamp = System.currentTimeMillis()))
-                dao.updateFriendLastMessageTime(senderId, System.currentTimeMillis())
-                sendAck(senderId, messageId, MessageStatus.DELIVERED)
-                notificationHelper.showNotification(senderId, content)
+            val messageUuid = parts[1]
+            
+            if (messageUuid == "CONNECT") {
+                scope.launch {
+                    dao.insertFriend(Friend(senderId, senderId, true, System.currentTimeMillis(), lastMessageTimestamp = System.currentTimeMillis()))
+                }
+                return
+            }
+
+            if (parts.size == 3) {
+                val content = parts[2]
+                scope.launch {
+                    val existingCount = dao.getMessageCountByUuid(messageUuid)
+                    if (existingCount > 0) {
+                        sendAck(senderId, messageUuid, MessageStatus.DELIVERED)
+                        return@launch
+                    }
+
+                    val isChatOpen = currentActiveChatFriendId == senderId
+                    val initialStatus = if (isChatOpen) MessageStatus.SEEN else MessageStatus.DELIVERED
+
+                    dao.insertMessage(Message(
+                        senderId = senderId, 
+                        receiverId = myId, 
+                        content = content, 
+                        isSentByMe = false, 
+                        messageUuid = messageUuid,
+                        status = initialStatus
+                    ))
+                    dao.insertFriend(Friend(senderId, senderId, true, System.currentTimeMillis(), lastMessageTimestamp = System.currentTimeMillis()))
+                    dao.updateFriendLastMessageTime(senderId, System.currentTimeMillis())
+                    
+                    val ackStatus = if (isChatOpen) MessageStatus.SEEN else MessageStatus.DELIVERED
+                    sendAck(senderId, messageUuid, ackStatus)
+                    
+                    if (!isAppInForeground) {
+                        notificationHelper.showNotification(senderId, content)
+                    }
+                }
             }
         }
     }
@@ -172,19 +221,27 @@ class MqttManager(private val context: Context, private val dao: ChatDao) {
                 if (messageIdStr == "ALL") {
                     dao.updateSentMessagesStatus(senderId, myId, status)
                 } else {
-                    val messageId = messageIdStr.toIntOrNull()
-                    if (messageId != null) {
-                        dao.updateMessageStatus(messageId, status)
-                    }
+                    // Precision update by UUID to prevent status leaks
+                    dao.updateMessageStatusByUuid(messageIdStr, status)
                 }
             }
         }
     }
 
-    private fun sendAck(friendId: String, messageId: String, status: MessageStatus) {
-        val payload = "$myId:$messageId:$status"
+    private fun sendAck(friendId: String, messageUuid: String, status: MessageStatus) {
+        val payload = "$myId:$messageUuid:$status"
         client?.publishWith()
             ?.topic("bjm/ack/$friendId")
+            ?.qos(MqttQos.AT_LEAST_ONCE)
+            ?.payload(payload.toByteArray())
+            ?.send()
+    }
+
+    fun notifyFriendAdded(friendId: String) {
+        val payload = "$myId:CONNECT"
+        client?.publishWith()
+            ?.topic("bjm/chat/$friendId")
+            ?.qos(MqttQos.AT_LEAST_ONCE)
             ?.payload(payload.toByteArray())
             ?.send()
     }
@@ -192,19 +249,29 @@ class MqttManager(private val context: Context, private val dao: ChatDao) {
     fun sendMessage(friendId: String, content: String) {
         scope.launch {
             val timestamp = System.currentTimeMillis()
-            val localId = dao.insertMessage(Message(senderId = myId, receiverId = friendId, content = content, isSentByMe = true, status = MessageStatus.PENDING, timestamp = timestamp)).toInt()
+            val uuid = UUID.randomUUID().toString()
+            val localId = dao.insertMessage(Message(
+                senderId = myId, 
+                receiverId = friendId, 
+                content = content, 
+                isSentByMe = true, 
+                status = MessageStatus.PENDING, 
+                timestamp = timestamp,
+                messageUuid = uuid
+            )).toInt()
             dao.updateFriendLastMessageTime(friendId, timestamp)
             
             if (_isConnected.value) {
-                sendMqttMessage(friendId, localId, content)
+                sendMqttMessage(friendId, uuid, content, localId)
             }
         }
     }
 
-    private fun sendMqttMessage(friendId: String, localId: Int, content: String) {
-        val payload = "$myId:$localId:$content"
+    private fun sendMqttMessage(friendId: String, uuid: String, content: String, localId: Int) {
+        val payload = "$myId:$uuid:$content"
         client?.publishWith()
             ?.topic("bjm/chat/$friendId")
+            ?.qos(MqttQos.AT_LEAST_ONCE)
             ?.payload(payload.toByteArray())
             ?.send()?.whenComplete { _, throwable ->
                 if (throwable == null) {
@@ -217,7 +284,7 @@ class MqttManager(private val context: Context, private val dao: ChatDao) {
         scope.launch {
             val pending = dao.getUndeliveredMessages(myId)
             pending.forEach { msg ->
-                sendMqttMessage(msg.receiverId, msg.id, msg.content)
+                sendMqttMessage(msg.receiverId, msg.messageUuid, msg.content, msg.id)
             }
         }
     }
@@ -226,7 +293,7 @@ class MqttManager(private val context: Context, private val dao: ChatDao) {
         scope.launch {
             val pending = dao.getUndeliveredMessages(myId).filter { it.receiverId == friendId }
             pending.forEach { msg ->
-                sendMqttMessage(msg.receiverId, msg.id, msg.content)
+                sendMqttMessage(msg.receiverId, msg.messageUuid, msg.content, msg.id)
             }
         }
     }
@@ -237,6 +304,7 @@ class MqttManager(private val context: Context, private val dao: ChatDao) {
             val payload = "$myId:ALL:SEEN"
             client?.publishWith()
                 ?.topic("bjm/ack/$friendId")
+                ?.qos(MqttQos.AT_LEAST_ONCE)
                 ?.payload(payload.toByteArray())
                 ?.send()
         }
@@ -275,7 +343,6 @@ class MqttManager(private val context: Context, private val dao: ChatDao) {
         val payload = "$myId:$isTyping"
         client?.publishWith()
             ?.topic("bjm/typing/$friendId")
-            ?.payload(payload.toByteArray())
             ?.send()
     }
 

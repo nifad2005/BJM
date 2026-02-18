@@ -33,11 +33,17 @@ interface ChatDao {
     @Query("SELECT * FROM messages WHERE (senderId = :friendId AND receiverId = :myId) OR (senderId = :myId AND receiverId = :friendId) ORDER BY timestamp ASC")
     fun getMessagesWithFriend(friendId: String, myId: String): Flow<List<Message>>
 
-    @Insert
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertMessage(message: Message): Long
+
+    @Query("SELECT COUNT(*) FROM messages WHERE messageUuid = :uuid")
+    suspend fun getMessageCountByUuid(uuid: String): Int
 
     @Query("UPDATE messages SET status = :status WHERE id = :messageId")
     suspend fun updateMessageStatus(messageId: Int, status: MessageStatus)
+
+    @Query("UPDATE messages SET status = :status WHERE messageUuid = :uuid AND status != 'SEEN'")
+    suspend fun updateMessageStatusByUuid(uuid: String, status: MessageStatus)
 
     @Query("UPDATE messages SET status = :status WHERE receiverId = :friendId AND senderId = :myId AND status != 'SEEN'")
     suspend fun updateSentMessagesStatus(friendId: String, myId: String, status: MessageStatus)
@@ -49,7 +55,7 @@ interface ChatDao {
     suspend fun markMessagesAsSeen(friendId: String, myId: String)
 }
 
-@Database(entities = [Friend::class, Message::class], version = 4, exportSchema = false)
+@Database(entities = [Friend::class, Message::class], version = 6, exportSchema = false)
 @TypeConverters(Converters::class)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun chatDao(): ChatDao
