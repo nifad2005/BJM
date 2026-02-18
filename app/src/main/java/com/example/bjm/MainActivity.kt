@@ -25,6 +25,7 @@ import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -32,6 +33,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -46,9 +48,12 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -543,6 +548,7 @@ fun ChatScreen(
     val messages by messagesFlow.collectAsState(initial = emptyList())
     var text by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
     
     var initialLoadDone by remember { mutableStateOf(false) }
     LaunchedEffect(messages) {
@@ -551,52 +557,175 @@ fun ChatScreen(
         }
     }
 
-    LaunchedEffect(messages.size) { if (messages.isNotEmpty()) listState.animateScrollToItem(messages.size - 1) }
-
-    LaunchedEffect(text) {
-        if (text.isNotEmpty()) { onTyping(true); delay(3000); onTyping(false) } else { onTyping(false) }
+    // Comprehensive Auto-scroll to bottom
+    LaunchedEffect(messages.size) { 
+        if (messages.isNotEmpty()) {
+            listState.animateScrollToItem(messages.size - 1)
+        }
     }
 
-    Scaffold(contentWindowInsets = WindowInsets(0,0,0,0), topBar = {
-        TopAppBar(title = {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                val bitmap = remember(friend.profilePic) { ProfileUtils.decodeImage(friend.profilePic) }
-                if (bitmap != null) {
-                    Image(bitmap.asImageBitmap(), null, Modifier.size(40.dp).clip(CircleShape), contentScale = ContentScale.Crop)
-                } else {
-                    Surface(Modifier.size(40.dp), shape = CircleShape, color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.1f)) {
-                        Icon(Icons.Default.Person, null, Modifier.padding(8.dp), tint = MaterialTheme.colorScheme.primary)
+    // Force scroll when keyboard height changes
+    val isImeVisible = WindowInsets.ime.asPaddingValues().calculateBottomPadding() > 0.dp
+    LaunchedEffect(isImeVisible) {
+        if (isImeVisible && messages.isNotEmpty()) {
+            delay(150) // Wait for layout stability
+            listState.animateScrollToItem(messages.size - 1)
+        }
+    }
+
+    LaunchedEffect(text) {
+        if (text.isNotEmpty()) { 
+            onTyping(true)
+            delay(3000)
+            onTyping(false) 
+        } else { 
+            onTyping(false) 
+        }
+    }
+
+    Scaffold(
+        contentWindowInsets = WindowInsets(0,0,0,0), 
+        topBar = {
+            TopAppBar(
+                title = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        val bitmap = remember(friend.profilePic) { ProfileUtils.decodeImage(friend.profilePic) }
+                        if (bitmap != null) {
+                            Image(bitmap.asImageBitmap(), null, Modifier.size(40.dp).clip(CircleShape), contentScale = ContentScale.Crop)
+                        } else {
+                            Surface(Modifier.size(40.dp), shape = CircleShape, color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.1f)) {
+                                Icon(Icons.Default.Person, null, Modifier.padding(8.dp), tint = MaterialTheme.colorScheme.primary)
+                            }
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Column {
+                            Text(friend.name, style = MaterialTheme.typography.titleMedium)
+                            Text(
+                                when { friend.isTyping -> "typing..."; friend.isOnline -> "Online"; else -> "Offline" },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (friend.isOnline || friend.isTyping) Color(0xFF4CAF50) else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                            )
+                        }
+                    }
+                }, 
+                navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent)
+            )
+        }
+    ) { padding ->
+        Column(
+            Modifier
+                .fillMaxSize()
+                .padding(top = padding.calculateTopPadding())
+                .imePadding()
+                .background(MaterialTheme.colorScheme.background)
+        ) {
+            Box(Modifier.weight(1f).fillMaxWidth()) {
+                LazyColumn(
+                    state = listState, 
+                    modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp), 
+                    contentPadding = PaddingValues(top = 16.dp, bottom = 80.dp), // Increased padding
+                    verticalArrangement = Arrangement.Bottom
+                ) {
+                    items(messages, key = { it.messageUuid.ifEmpty { it.id.toString() } }) { msg -> 
+                        ChatBubble(msg, initialLoadDone)
+                        Spacer(Modifier.height(6.dp)) 
                     }
                 }
-                Spacer(Modifier.width(12.dp))
-                Column {
-                    Text(friend.name, style = MaterialTheme.typography.titleMedium)
-                    Text(
-                        when { friend.isTyping -> "typing..."; friend.isOnline -> "Online"; else -> "Offline" },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = if (friend.isOnline || friend.isTyping) Color(0xFF4CAF50) else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
-                    )
-                }
+                
+                // Top fading gradient
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .fillMaxWidth()
+                        .height(40.dp)
+                        .background(
+                            Brush.verticalGradient(
+                                listOf(MaterialTheme.colorScheme.background, Color.Transparent)
+                            )
+                        )
+                )
+
+                // Bottom fading gradient
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .height(60.dp) // Height matches opaque part
+                        .background(
+                            Brush.verticalGradient(
+                                listOf(Color.Transparent, MaterialTheme.colorScheme.background),
+                                startY = 0f,
+                                endY = 100f
+                            )
+                        )
+                )
             }
-        }, navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } })
-    }) { padding ->
-        Column(Modifier.fillMaxSize().padding(top = padding.calculateTopPadding()).background(MaterialTheme.colorScheme.background)) {
-            LazyColumn(state = listState, modifier = Modifier.weight(1f).padding(horizontal = 16.dp), verticalArrangement = Arrangement.Bottom) {
-                items(messages, key = { it.id }) { msg -> ChatBubble(msg, initialLoadDone); Spacer(Modifier.height(4.dp)) }
-            }
-            Surface(tonalElevation = 8.dp, shadowElevation = 8.dp, color = MaterialTheme.colorScheme.surface, modifier = Modifier.navigationBarsPadding()) {
-                Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp).imePadding(), verticalAlignment = Alignment.CenterVertically) {
+
+            // Stylish Input Area
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .navigationBarsPadding()
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                color = Color.Transparent
+            ) {
+                Row(
+                    modifier = Modifier
+                        .background(
+                            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                            RoundedCornerShape(28.dp)
+                        )
+                        .border(
+                            width = 1.dp,
+                            brush = Brush.horizontalGradient(
+                                listOf(MaterialTheme.colorScheme.primary.copy(alpha = 0.3f), MaterialTheme.colorScheme.secondary.copy(alpha = 0.1f))
+                            ),
+                            shape = RoundedCornerShape(28.dp)
+                        )
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                     TextField(
-                        value = text, onValueChange = { text = it }, placeholder = { Text("Type a message...") }, modifier = Modifier.weight(1f),
-                        colors = TextFieldDefaults.colors(focusedContainerColor = MaterialTheme.colorScheme.background, unfocusedContainerColor = MaterialTheme.colorScheme.background, focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent),
-                        shape = RoundedCornerShape(24.dp)
+                        value = text, 
+                        onValueChange = { text = it }, 
+                        placeholder = { Text("Type a message...", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)) }, 
+                        modifier = Modifier.weight(1f),
+                        colors = TextFieldDefaults.colors(
+                            focusedContainerColor = Color.Transparent, 
+                            unfocusedContainerColor = Color.Transparent, 
+                            focusedIndicatorColor = Color.Transparent, 
+                            unfocusedIndicatorColor = Color.Transparent,
+                            cursorColor = MaterialTheme.colorScheme.primary
+                        ),
+                        keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
+                        textStyle = MaterialTheme.typography.bodyLarge.copy(fontSize = 16.sp)
                     )
-                    Spacer(Modifier.width(8.dp))
+                    
+                    val sendScale = remember { Animatable(1f) }
+                    
                     IconButton(
-                        onClick = { if (text.isNotBlank()) { onSend(text); text = "" } },
-                        colors = IconButtonDefaults.iconButtonColors(containerColor = MaterialTheme.colorScheme.primary, contentColor = MaterialTheme.colorScheme.onPrimary),
-                        modifier = Modifier.size(48.dp)
-                    ) { Icon(Icons.AutoMirrored.Filled.Send, "Send", Modifier.size(20.dp)) }
+                        onClick = { 
+                            if (text.isNotBlank()) { 
+                                scope.launch {
+                                    sendScale.animateTo(0.8f, tween(100))
+                                    sendScale.animateTo(1.2f, spring(Spring.DampingRatioHighBouncy))
+                                    sendScale.animateTo(1f, spring())
+                                }
+                                onSend(text)
+                                text = "" 
+                            } 
+                        },
+                        colors = IconButtonDefaults.iconButtonColors(
+                            containerColor = MaterialTheme.colorScheme.primary, 
+                            contentColor = MaterialTheme.colorScheme.onPrimary
+                        ),
+                        modifier = Modifier
+                            .size(44.dp)
+                            .scale(sendScale.value)
+                    ) { 
+                        Icon(Icons.AutoMirrored.Filled.Send, "Send", Modifier.size(20.dp)) 
+                    }
                 }
             }
         }
@@ -606,29 +735,51 @@ fun ChatScreen(
 @Composable
 fun ChatBubble(msg: Message, shouldAnimate: Boolean) {
     val alignment = if (msg.isSentByMe) Alignment.End else Alignment.Start
-    val bgColor = if (msg.isSentByMe) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surface
+    val bgColor = if (msg.isSentByMe) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.8f)
     val textColor = if (msg.isSentByMe) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
-    val shape = if (msg.isSentByMe) RoundedCornerShape(18.dp, 18.dp, 2.dp, 18.dp) else RoundedCornerShape(18.dp, 18.dp, 18.dp, 2.dp)
+    val shape = if (msg.isSentByMe) {
+        RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp, bottomStart = 20.dp, bottomEnd = 4.dp)
+    } else {
+        RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp, bottomStart = 4.dp, bottomEnd = 20.dp)
+    }
     
     val timeFormat = remember { SimpleDateFormat("h:mm a", Locale.getDefault()) }
     val timeString = remember(msg.timestamp) { timeFormat.format(Date(msg.timestamp)) }
 
     Column(Modifier.fillMaxWidth(), horizontalAlignment = alignment) {
-        val scale = remember { Animatable(if (shouldAnimate) 0.7f else 1f) }
-        LaunchedEffect(Unit) { if (shouldAnimate) scale.animateTo(1f, spring(Spring.DampingRatioLowBouncy, Spring.StiffnessMediumLow)) }
+        val entryTransition = remember { Animatable(if (shouldAnimate) 0f else 1f) }
+        val offsetX = remember { Animatable(if (shouldAnimate) (if (msg.isSentByMe) 50f else -50f) else 0f) }
         
-        Surface(color = bgColor, shape = shape, tonalElevation = if (msg.isSentByMe) 0.dp else 2.dp, modifier = Modifier.scale(scale.value)) {
+        LaunchedEffect(Unit) { 
+            if (shouldAnimate) {
+                launch { entryTransition.animateTo(1f, tween(400, easing = FastOutSlowInEasing)) }
+                launch { offsetX.animateTo(0f, spring(Spring.DampingRatioMediumBouncy)) }
+            }
+        }
+        
+        Surface(
+            color = bgColor, 
+            shape = shape, 
+            tonalElevation = if (msg.isSentByMe) 0.dp else 1.dp, 
+            modifier = Modifier
+                .graphicsLayer(
+                    alpha = entryTransition.value,
+                    scaleX = 0.8f + (entryTransition.value * 0.2f),
+                    scaleY = 0.8f + (entryTransition.value * 0.2f),
+                    translationX = offsetX.value
+                )
+        ) {
             Column(Modifier.padding(horizontal = 12.dp, vertical = 6.dp)) {
-                Text(msg.content, color = textColor, fontSize = 15.sp)
+                Text(msg.content, color = textColor, fontSize = 15.sp, lineHeight = 18.sp)
                 Row(
-                    modifier = Modifier.align(Alignment.End).padding(top = 2.dp),
+                    modifier = Modifier.align(Alignment.End),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     Text(
                         timeString, 
                         fontSize = 10.sp, 
-                        color = textColor.copy(alpha = 0.7f)
+                        color = textColor.copy(alpha = 0.6f)
                     )
                     if (msg.isSentByMe) {
                         val icon = when (msg.status) {
@@ -639,7 +790,7 @@ fun ChatBubble(msg: Message, shouldAnimate: Boolean) {
                         Icon(
                             icon, null, 
                             Modifier.size(12.dp), 
-                            tint = if (msg.status == MessageStatus.SEEN) Color(0xFF42A5F5) else textColor.copy(alpha = 0.6f)
+                            tint = if (msg.status == MessageStatus.SEEN) Color(0xFF42A5F5) else textColor.copy(alpha = 0.5f)
                         )
                     }
                 }
